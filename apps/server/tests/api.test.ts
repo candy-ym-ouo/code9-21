@@ -169,6 +169,24 @@ describe('E2 时机闭环：窗口与判定理由', () => {
     expect(typeof res.body.anchorLocal).toBe('string');
     expect(res.body.satisfiability).toBeTruthy();
   });
+
+  it('历史窗口可用落库快照重放：重算判定与存储判定逐条一致（旧窗口可复现）', async () => {
+    await call('post', `/api/inspirations/${cardId}/windows/recompute`, { days: 7 });
+    const res = await call('get', `/api/inspirations/${cardId}/windows/replay`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(7);
+    expect(res.body.matched).toBe(7);
+    for (const item of res.body.items as {
+      verdict: string;
+      storedVerdict: string;
+      matches: boolean;
+      diffs: unknown[];
+    }[]) {
+      expect(item.matches).toBe(true);
+      expect(item.verdict).toBe(item.storedVerdict);
+      expect(item.diffs).toEqual([]);
+    }
+  });
 });
 
 describe('E3/E4 提醒与出行计划', () => {

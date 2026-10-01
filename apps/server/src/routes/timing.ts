@@ -27,6 +27,7 @@ import {
   timingRowToDto,
   windowSummary,
 } from '../services/windowEngine.js';
+import { loadWindowRows, replayWindow } from '../services/windowReplay.js';
 import { climateAt, climateStats, getForecast } from '../services/weather.js';
 import { toInspirationDto } from '../services/serialization.js';
 
@@ -185,6 +186,40 @@ timingRouter.post(
     const days = Math.min(16, Math.max(1, Number(req.body?.days ?? 7)));
     const items = await computeWindowsForInspiration(row.id, { days });
     ok(res, { items });
+  }),
+);
+
+/**
+ * 历史窗口重放（文档 12.7）：用落库时冻结的 forecast_snapshot + 当前统一口径，
+ * 对每张已存窗口做纯重算并与存储 verdict/reasons 比对。**不落库、不改判定**，
+ * 仅用于验证"旧窗口今天还能被一字不差地复算出来"。
+ */
+timingRouter.get(
+  '/inspirations/:id/windows/replay',
+  ah(async (req, res) => {
+    const ctx = ctxOf(req);
+    const row = requireInspiration(req.params.id, ctx.libraryId);
+    const timingRow = loadTiming(row.id);
+    if (!timingRow) throw errors.timingIncomplete();
+    if (!row.spot_id) throw errors.badRequest('该卡片还没有机位');
+    const spot = loadSpotGeom(row.spot_id);
+    if (!spot) throw errors.badRequest('机位不存在');
+
+    const timing = timingRowToDto(timingRow);
+    const results = loadWindowRows(row.id).map((w) => replayWindow(spot, timing, w));
+    ok(res, {
+      total: results.length,
+      matched: results.filter((r) => r.matches).length,
+      items: results.map((r) => ({
+        windowId: r.windowId,
+        date: r.date,
+        verdict: r.verdict,
+        storedVerdict: r.storedVerdict,
+        matches: r.matches,
+        diffs: r.diffs,
+        episode: r.episode,
+      })),
+    });
   }),
 );
 

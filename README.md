@@ -43,8 +43,8 @@ npm start          # 后端 3000 端口同时托管前端，SPA fallback 已配�
 ## 验证（这三条命令就是"真的能跑"的证明）
 
 ```bash
-npm test                        # 76 个自动化测试：天文 / 几何 / geohash / 窗口判定 / API 闭环
-npm run smoke                   # 69 项真实 HTTP 断言（需先启动服务端）
+npm test                        # 93 个自动化测试：天文 / 几何 / geohash / 气象纯口径 / 窗口判定 / 历史窗口重放 / API 闭环
+npm run smoke                   # 68 项真实 HTTP 断言（需先启动服务端）
 npm run test:e2e                # 2 个真实浏览器闭环用例（需先 npm run build && npm start）
 ```
 
@@ -83,25 +83,35 @@ npx playwright install chromium
 
 ```
 origin/
-├── packages/shared/          # 前后端共享：枚举、类型、zod schema、天文/几何/geohash 纯函数
-│   └── src/astro.ts          #   ↑ 自研太阳位置算法（无三方天文库）
+├── packages/shared/          # 前后端共享：枚举、类型、zod schema、纯函数（判定的唯一口径）
+│   ├── src/astro.ts          #   ↑ 自研太阳位置算法（无三方天文库）
+│   ├── src/time.ts           #   时区换算 + 方位角夹角原语（angularDistance）
+│   ├── src/weather.ts        #   气象口径：episode 聚合 / 现象阈值 / 画像评估（纯函数）
+│   └── src/window.ts         #   窗口口径：采样交集 / decideDayWindow / 理论日历（纯函数）
 ├── apps/server/              # Node.js + Express + better-sqlite3 + sharp
 │   ├── sql/0001_init.sql     # 建表 SQL（可读、可 diff）
 │   └── src/
 │       ├── services/         # 全部闭环逻辑集中在这里
-│       │   ├── windowEngine.ts   # 窗口计算与判定理由
-│       │   ├── weather.ts        # Open-Meteo 取数 + 缓存 + 降级 + 气候基线
+│       │   ├── windowDecide.ts  # 纯判定适配（无 DB，委托 shared/decideDayWindow）
+│       │   ├── windowEngine.ts  # 窗口取数 + 落库 + 幂等更新（不含判定口径）
+│       │   ├── windowReplay.ts  # ★ 历史窗口按 forecast_snapshot 重放并与存储判定比对
+│       │   ├── windowRows.ts    # timing/spot 行类型与 DTO 投影（叶子模块）
+│       │   ├── weather.ts        # Open-Meteo 取数 + 缓存 + 降级 + 气候基线（口径在 shared）
 │       │   ├── fuzzing.ts        # 地点模糊化（geohash 网格中心）
 │       │   ├── calibration.ts    # 回填校准与收窄
 │       │   ├── reminders.ts      # 9 条提醒规则 + 终态保证
 │       │   ├── albums.ts         # 画册匹配 / 缺口 / 发布快照
-│       │   └── serialization.ts  # ★ 精确坐标的唯一出口
+│       │   └── serialization.ts  # ★ 精确坐标 & repro_window 行→DTO 的唯一出口
 │       └── routes/           # 8 个路由模块，约 70 个端点
 └── apps/web/                 # React 18 + Vite + TypeScript + Ant Design
     ├── src/components/       # TagPicker / AnnotationEditor(Canvas 标注) / TimingEditor /
     │                         # WindowList / MapCanvas(自绘可换瓦片源) / ResultForm
     └── src/routes/           # 今日 / 收件箱 / 灵感卡 / 检索 / 计划 / 画册 / 地点 / 设置 / 分享页
 ```
+
+历史窗口重放：`GET /api/inspirations/:id/windows/replay` 用落库时冻结的
+`forecast_snapshot` + 当前统一口径逐条复算，返回 verdict/reasons 与存储判定的 diff，
+不落库、不改数据——重构口径后用它证明"旧窗口仍能一字不差地复现"。
 
 ---
 

@@ -16,7 +16,7 @@ import {
   Typography,
   message,
 } from 'antd';
-import type { TimingDto, TimeAnchor } from '@flil/shared';
+import { expectedAzimuth, type TimingDto, type TimeAnchor } from '@flil/shared';
 import { useMeta, usePreviewTiming, useSaveTiming } from '../api/hooks.js';
 
 interface Props {
@@ -55,9 +55,10 @@ export function TimingEditor({ inspirationId, initial, cameraBearing, lightBeari
     }
   }, [initial]);
 
-  const expectedAzimuth = useMemo(() => {
+  const expectedAz = useMemo(() => {
     if (cameraBearing === null || lightBearingHint === null || lightBearingHint === undefined) return null;
-    return Math.round((((cameraBearing + lightBearingHint) % 360) + 360) % 360);
+    // 方位角口径统一走 @flil/shared（expectedAzimuth：绕 360° 归一）
+    return Math.round(expectedAzimuth(cameraBearing, lightBearingHint));
   }, [cameraBearing, lightBearingHint]);
 
   function patchTiming(patch: Partial<TimingDto>) {
@@ -165,8 +166,8 @@ export function TimingEditor({ inspirationId, initial, cameraBearing, lightBeari
               <>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                   期望方位角 = 拍摄朝向（{cameraBearing ?? '未设置'}°）+ 光位角。
-                  {expectedAzimuth !== null
-                    ? ` 根据你画的光位箭头 ${Math.round(lightBearingHint!)}°，系统建议 ${expectedAzimuth}°±${timing.azimuthTolerance}°。`
+                  {expectedAz !== null
+                    ? ` 根据你画的光位箭头 ${Math.round(lightBearingHint!)}°，系统建议 ${expectedAz}°±${timing.azimuthTolerance}°。`
                     : ' 还没有光位标注时，可以手动填方位角。'}
                 </Typography.Text>
                 <Space>

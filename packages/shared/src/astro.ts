@@ -5,7 +5,14 @@
  * 以及窗口内的逐点采样。所有角度单位为「度」，方位角以正北为 0、顺时针增加。
  */
 
-import { addMinutes, localDayRangeUtc, parseLocalDateKey, zonedTimeToUtc, utcToZonedParts } from './time.js';
+import {
+  addMinutes,
+  angularDistance,
+  localDayRangeUtc,
+  parseLocalDateKey,
+  zonedTimeToUtc,
+  utcToZonedParts,
+} from './time.js';
 import type { TimingDto } from './types.js';
 
 const DEG = Math.PI / 180;
@@ -390,81 +397,14 @@ export function sampleWindow(
   return out;
 }
 
-/** 一年中"该条件理论可成立"的天数（只看天文与季节，不含天气），见 12.5。 */
-export function theoreticalDaysInYear(
-  lat: number,
-  lng: number,
-  tz: string,
-  timing: Pick<
-    TimingDto,
-    | 'timeAnchor'
-    | 'anchorOffsetMin'
-    | 'elevationRange'
-    | 'azimuthRange'
-    | 'azimuthTolerance'
-    | 'seasonWindow'
-    | 'windowToleranceMin'
-  >,
-  year: number,
-): { date: string; ok: boolean }[] {
-  const out: { date: string; ok: boolean }[] = [];
-  const start = new Date(Date.UTC(year, 0, 1));
-  for (let i = 0; i < 366; i += 1) {
-    const d = new Date(start.getTime() + i * 86400000);
-    if (d.getUTCFullYear() !== year) break;
-    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
-      d.getUTCDate(),
-    ).padStart(2, '0')}`;
-    out.push({ date: key, ok: theoreticalOkForDay(lat, lng, tz, key, timing) });
-  }
-  return out;
-}
-
-export function theoreticalOkForDay(
-  lat: number,
-  lng: number,
-  tz: string,
-  date: string,
-  timing: Pick<
-    TimingDto,
-    | 'timeAnchor'
-    | 'anchorOffsetMin'
-    | 'elevationRange'
-    | 'azimuthRange'
-    | 'azimuthTolerance'
-    | 'seasonWindow'
-    | 'windowToleranceMin'
-  >,
-): boolean {
-  if (timing.seasonWindow) {
-    const { month } = parseLocalDateKey(date);
-    const { fromMonth, toMonth } = timing.seasonWindow;
-    const inSeason =
-      fromMonth <= toMonth ? month >= fromMonth && month <= toMonth : month >= fromMonth || month <= toMonth;
-    if (!inSeason) return false;
-  }
-  const events = sunEvents(lat, lng, tz, date);
-  const resolved = resolveAnchor(events, timing);
-  if (!resolved) return false;
-  const [start, end] = bandToRange(resolved, timing);
-  const samples = sampleWindow(lat, lng, start, end, 5);
-  const usable = samples.filter((s) => elevationInRange(s.elevationDeg, timing.elevationRange));
-  if (usable.length < 2) return false;
-  if (!timing.azimuthRange) return true;
-  const [azLo, azHi] = timing.azimuthRange;
-  const center = (azLo + azHi) / 2;
-  return usable.some((s) => angularDistance(s.azimuthDeg, center) <= timing.azimuthTolerance + 0.001);
-}
-
+/** 仰角判定（边界外扩 0.05° 容差，吸纳采样/计算误差）。range 非法时视为不限制。 */
 export function elevationInRange(elevationDeg: number, range: number[]): boolean {
   if (!Array.isArray(range) || range.length !== 2) return true;
   return elevationDeg >= range[0] - 0.05 && elevationDeg <= range[1] + 0.05;
 }
 
-export function angularDistance(a: number, b: number): number {
-  const d = Math.abs((((a - b) % 360) + 360) % 360);
-  return d > 180 ? 360 - d : d;
-}
+// angularDistance 的唯一实现位于 time.ts（角度原语叶子模块），此处由顶部 import 再导出。
+export { angularDistance };
 
 /** 把锚点解析结果变成用于判定的 [start, end] 区间 */
 export function bandToRange(

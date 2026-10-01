@@ -9,17 +9,20 @@ import type {
   MissReason,
   PlanDto,
   ReminderDto,
+  ReproWindowDto,
   SpotDto,
   TagDto,
   TagSource,
   TimingDto,
   TagDomain,
+  WindowVerdict,
 } from '@flil/shared';
 import { TAG_DOMAINS } from '@flil/shared';
 import { getDb, parseJson, rowToBool } from '../db.js';
 import { config } from '../config.js';
 import { fuzzSpotCached, type PlaceRow, type SpotRow } from './fuzzing.js';
-import { loadTiming, timingRowToDto, windowSummary } from './windowEngine.js';
+import { loadTiming, windowSummary } from './windowEngine.js';
+import { timingRowToDto } from './windowRows.js';
 import type { AssetRow } from './assets.js';
 
 export interface SerializeContext {
@@ -304,4 +307,26 @@ export function defaultFuzzLevelOf(libraryId: string): FuzzLevel {
     .prepare('SELECT default_fuzz_level FROM library WHERE id = ?')
     .get(libraryId) as { default_fuzz_level: string } | undefined;
   return (row?.default_fuzz_level as FuzzLevel) ?? config.defaultFuzzLevel;
+}
+
+/**
+ * 历史窗口行 → ReproWindowDto 的唯一映射出口。
+ * 凡是读 repro_window 表对外输出的地方都必须走这里，避免列名/布尔口径各写一份。
+ */
+export function toWindowDto(row: Record<string, unknown>): ReproWindowDto {
+  return {
+    id: row.id as string,
+    inspirationId: row.inspiration_id as string,
+    date: row.date as string,
+    startAt: row.start_at as string,
+    endAt: row.end_at as string,
+    anchorAt: row.anchor_at as string,
+    sunElevation: (row.sun_elevation as number | null) ?? null,
+    sunAzimuth: (row.sun_azimuth as number | null) ?? null,
+    verdict: row.verdict as WindowVerdict,
+    reasons: parseJson<ReproWindowDto['reasons']>(row.reasons as string, []),
+    weatherDegraded: row.weather_degraded === 1,
+    stale: row.stale === 1,
+    computedAt: (row.computed_at as string | null) ?? null,
+  };
 }

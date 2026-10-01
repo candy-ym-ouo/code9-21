@@ -114,11 +114,14 @@ export function expectedAzimuth(cameraBearing: number, lightBearing: number): nu
   return (((cameraBearing + lightBearing) % 360) + 360) % 360;
 }
 
-export function angleDiff(a: number, b: number): number {
-  const d = Math.abs((((a - b) % 360) + 360) % 360);
-  return d > 180 ? 360 - d : d;
-}
+/**
+ * 光位与朝向角度原语。
+ * 角度差的唯一实现是 time.ts 的 angularDistance（正北 0°、顺时针、绕 360°），
+ * 这里保留 angleDiff/angleWithin 旧名做再导出，历史调用不必改名。
+ */
+export { angularDistance as angleDiff } from './time.js';
+import { angularDistance } from './time.js';
 
 export function angleWithin(value: number, center: number, tolerance: number): boolean {
-  return angleDiff(value, center) <= tolerance;
+  return angularDistance(value, center) <= tolerance;
 }

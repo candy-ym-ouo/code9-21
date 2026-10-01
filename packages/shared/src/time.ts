@@ -113,6 +113,15 @@ export function addMinutes(date: Date, minutes: number): Date {
   return new Date(date.getTime() + minutes * 60000);
 }
 
+/**
+ * 两个方位角之间的最短夹角（度，0..180）。
+ * 方位角唯一口径：正北为 0、顺时针增加；所有光位/朝向比较都必须走这里。
+ */
+export function angularDistance(a: number, b: number): number {
+  const d = Math.abs((((a - b) % 360) + 360) % 360); // 0..360
+  return d > 180 ? 360 - d : d;
+}
+
 export function parseQuietHours(spec: string): { startMin: number; endMin: number } {
   const m = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(spec.trim());
   if (!m) return { startMin: 22 * 60, endMin: 7 * 60 };

@@ -125,8 +125,9 @@ describe('年度理论可成立天数', () => {
   });
 
   it('极严的仰角区间会显著减少可成立天数（说明可满足性检查有意义）', () => {
-    const loose = baseTiming({ timeAnchor: 'golden_pm' });
-    const strict = baseTiming({ timeAnchor: 'golden_pm', elevationRange: [-4.02, -3.98] });
+    // 用普通锚点（不带锚点自带仰角），timing.elevationRange 才是判定口径
+    const loose = baseTiming({ timeAnchor: 'sunset_minus', elevationRange: [-4, 10] });
+    const strict = baseTiming({ timeAnchor: 'sunset_minus', elevationRange: [-4.02, -3.98] });
     const count = (t: TimingDto) =>
       Array.from({ length: 60 }, (_, i) => {
         const d = new Date(Date.UTC(2026, 8, 1 + i));
@@ -136,5 +137,23 @@ describe('年度理论可成立天数', () => {
         return theoreticalOkForDay(SHANGHAI.lat, SHANGHAI.lng, SHANGHAI.tz, key, t);
       }).filter(Boolean).length;
     expect(count(loose)).toBeGreaterThan(count(strict));
+  });
+
+  it('理论判定与窗口判定共用仰角口径：黄金时刻锚点的自带仰角优先生效', () => {
+    // golden_pm 自带 [-4,6]：即使 timing 把仰角放宽到 [-90,90]，可成立天数也不变；
+    // 这是与 decideDayWindow 统一后的口径（旧实现曾在此忽略锚点自带区间，
+    // 导致理论日历与单日判定对同一张卡给出不同结论）。
+    const defaultRange = baseTiming({ timeAnchor: 'golden_pm' });
+    const widened = baseTiming({ timeAnchor: 'golden_pm', elevationRange: [-90, 90] });
+    const count = (t: TimingDto) =>
+      Array.from({ length: 60 }, (_, i) => {
+        const d = new Date(Date.UTC(2026, 8, 1 + i));
+        const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
+          d.getUTCDate(),
+        ).padStart(2, '0')}`;
+        return theoreticalOkForDay(SHANGHAI.lat, SHANGHAI.lng, SHANGHAI.tz, key, t);
+      }).filter(Boolean).length;
+    expect(count(widened)).toBe(count(defaultRange));
+    expect(count(defaultRange)).toBeGreaterThan(0);
   });
 });
