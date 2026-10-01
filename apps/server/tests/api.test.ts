@@ -169,6 +169,35 @@ describe('E2 时机闭环：窗口与判定理由', () => {
     expect(typeof res.body.anchorLocal).toBe('string');
     expect(res.body.satisfiability).toBeTruthy();
   });
+
+  it('历史窗口可重放：用落库输入快照重算，verdict 与逐项理由完全一致', async () => {
+    const res = await call('post', `/api/inspirations/${cardId}/windows/replay`, {});
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(7);
+    expect(res.body.replayable).toBe(7);
+    expect(res.body.identical).toBe(true);
+    for (const item of res.body.items) {
+      expect(item.replayable).toBe(true);
+      expect(item.identical).toBe(true);
+      expect(item.replayed.verdict).toBe(item.stored.verdict);
+      expect(item.replayed.reasons).toEqual(item.stored.reasons);
+      expect(item.replayed.startAt).toBe(item.stored.startAt);
+      expect(typeof item.engineVersion).toBe('string');
+    }
+  });
+
+  it('单窗口重放接口返回同一结果；不存在的窗口 404', async () => {
+    const windows = await call('get', `/api/inspirations/${cardId}/windows?days=7`);
+    const w = windows.body.items[0];
+    const one = await call('post', `/api/windows/${w.id}/replay`, {});
+    expect(one.status).toBe(200);
+    expect(one.body.replayable).toBe(true);
+    expect(one.body.identical).toBe(true);
+    expect(one.body.replayed.verdict).toBe(w.verdict);
+
+    const missing = await call('post', '/api/windows/nope/replay', {});
+    expect(missing.status).toBe(404);
+  });
 });
 
 describe('E3/E4 提醒与出行计划', () => {

@@ -43,7 +43,7 @@ npm start          # 后端 3000 端口同时托管前端，SPA fallback 已配�
 ## 验证（这三条命令就是"真的能跑"的证明）
 
 ```bash
-npm test                        # 76 个自动化测试：天文 / 几何 / geohash / 窗口判定 / API 闭环
+npm test                        # 88 个自动化测试：天文 / 几何 / 窗口纯管线 / geohash / 窗口判定 / API 闭环（含历史窗口重放）
 npm run smoke                   # 69 项真实 HTTP 断言（需先启动服务端）
 npm run test:e2e                # 2 个真实浏览器闭环用例（需先 npm run build && npm start）
 ```
@@ -73,6 +73,7 @@ npx playwright install chromium
 | **光位 → 方位角约束** | 你在图上画一个光位箭头，加上机位朝向，系统就能算出"太阳必须出现在哪个方位"，从而判断另一天的光位对不对。 |
 | **判定必须给理由** | 每条窗口都输出"云量 62%（目标 20%–50%）"这样的实际值 vs 目标值，可人工复算。 |
 | **硬性项 vs 软性项** | 降水概率超限 = 不可拍（bad）；云量偏差 = 勉强（marginal）。不会因为一点云就把机会判死。 |
+| **口径唯一、历史窗口可重放** | 时间（`time.ts`）、方位（`geometry.ts` 的 `angleDiff`）、气象（`weather.ts` 阈值/聚合）三套口径各只有一处实现；窗口判定是 `windowing.ts` 的纯函数。每条窗口落库时写入 `input_snapshot`（条件 + 机位 + 当次预报切片 + provider + 算法版本），日后可用 `POST /api/inspirations/:id/windows/replay` 按原输入逐字节复算并比对 verdict/reasons；快照机制之前的旧窗口返回 `replayable=false`，原判定保留可读。 |
 | **回填反哺判断** | 连续 3 次同因（天气不符/时间差了）未命中 → 系统自动收紧方位角容差或云量区间，并留下**可撤销**的校准记录。 |
 | **地点模糊化不是"打个码"** | 用 geohash 网格中心做稳定输出（不是随机抖动——随机值可被多次请求平均反推）；`exact`/`g100` 在服务端被**强制降级**为 500m，不靠前端隐藏。 |
 | **画册有缺口清单** | 画册不是文件夹：定主题 → 系统算出"还差什么" → 每条缺口给一键动作 → 必需缺口不闭合则**发布被拒（409）**。 |
@@ -84,7 +85,12 @@ npx playwright install chromium
 ```
 origin/
 ├── packages/shared/          # 前后端共享：枚举、类型、zod schema、天文/几何/geohash 纯函数
-│   └── src/astro.ts          #   ↑ 自研太阳位置算法（无三方天文库）
+│   ├── src/astro.ts          #   ↑ 自研太阳位置算法（无三方天文库）
+│   ├── src/time.ts           #   时间口径（时区/本地日期键，唯一实现）
+│   ├── src/geometry.ts       #   方位口径（angleDiff / 光位角↔太阳方位角，唯一实现）
+│   ├── src/weather.ts        #   气象口径（阈值/窗口聚合/现象判定，纯函数，provider 注入）
+│   ├── src/windowing.ts      #   窗口判定纯管线 + 输入快照（未来计算与历史重放同源）
+│   └── src/serialization.ts  #   行 → DTO 纯映射（窗口序列化唯一出口）
 ├── apps/server/              # Node.js + Express + better-sqlite3 + sharp
 │   ├── sql/0001_init.sql     # 建表 SQL（可读、可 diff）
 │   └── src/

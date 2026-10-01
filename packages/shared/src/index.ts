@@ -5,5 +5,8 @@ export * from './geo.js';
 export * from './time.js';
 export * from './palette.js';
 export * from './astro.js';
+export * from './weather.js';
+export * from './windowing.js';
+export * from './serialization.js';
 export * from './schemas.js';
 export * from './presets.js';

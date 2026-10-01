@@ -5,7 +5,15 @@
  * 以及窗口内的逐点采样。所有角度单位为「度」，方位角以正北为 0、顺时针增加。
  */
 
-import { addMinutes, localDayRangeUtc, parseLocalDateKey, zonedTimeToUtc, utcToZonedParts } from './time.js';
+import {
+  addMinutes,
+  localDayRangeUtc,
+  minutesBetween,
+  parseLocalDateKey,
+  zonedTimeToUtc,
+  utcToZonedParts,
+} from './time.js';
+import { angleDiff, angleWithin } from './geometry.js';
 import type { TimingDto } from './types.js';
 
 const DEG = Math.PI / 180;
@@ -461,10 +469,11 @@ export function elevationInRange(elevationDeg: number, range: number[]): boolean
   return elevationDeg >= range[0] - 0.05 && elevationDeg <= range[1] + 0.05;
 }
 
-export function angularDistance(a: number, b: number): number {
-  const d = Math.abs((((a - b) % 360) + 360) % 360);
-  return d > 180 ? 360 - d : d;
-}
+/**
+ * 环形角距 —— 旧接口名，保留以兼容历史调用与回放；
+ * 新代码请直接使用 geometry.ts 的 angleDiff / angleWithin（全项目唯二方位口径）。
+ */
+export const angularDistance = angleDiff;
 
 /** 把锚点解析结果变成用于判定的 [start, end] 区间 */
 export function bandToRange(

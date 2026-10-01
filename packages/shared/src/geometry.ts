@@ -101,6 +101,21 @@ export function validateGeometry(kind: string, geometry: unknown): { ok: true } 
   return { ok: false, error: `未知标注类型：${kind}` };
 }
 
+/**
+ * 方位口径（全项目唯一，见文档 9.3）：
+ * 所有角度单位为「度」，0°=正北、顺时针增加；环形（跨 0°/360°）比较一律走 angleDiff。
+ */
+
+/** 两点在圆周上的最短角距（0..180）。这是全项目唯一的环形角距实现。 */
+export function angleDiff(a: number, b: number): number {
+  const d = Math.abs((((a - b) % 360) + 360) % 360);
+  return d > 180 ? 360 - d : d;
+}
+
+export function angleWithin(value: number, center: number, tolerance: number): boolean {
+  return angleDiff(value, center) <= tolerance;
+}
+
 /** 由画面上的光位箭头推算光位角：0°=正对面光源(顺光)，90°=光从右来，180°=逆光 */
 export function bearingFromArrow(from: Point, to: Point): number {
   const dx = to.x - from.x;
@@ -114,11 +129,21 @@ export function expectedAzimuth(cameraBearing: number, lightBearing: number): nu
   return (((cameraBearing + lightBearing) % 360) + 360) % 360;
 }
 
-export function angleDiff(a: number, b: number): number {
-  const d = Math.abs((((a - b) % 360) + 360) % 360);
-  return d > 180 ? 360 - d : d;
+/** 反解：实测太阳方位角 − 拍摄朝向 = 实际光位角（expectedAzimuth 的逆运算，统一方位口径用） */
+export function lightBearingFromAzimuth(cameraBearing: number, sunAzimuth: number): number {
+  return (((sunAzimuth - cameraBearing) % 360) + 360) % 360;
 }
 
-export function angleWithin(value: number, center: number, tolerance: number): boolean {
-  return angleDiff(value, center) <= tolerance;
+/**
+ * 太阳方位角是否落在以 center 为中心、tolerance 为半径的环形区间内。
+ * 注意：与历史窗口判定保持一致——区间以 [lo, hi] 的算术中点为中心，
+ * 不做跨 0° 展开（历史窗口必须可重放，既有判定口径不得改变）。
+ */
+export function azimuthWithinRange(
+  sunAzimuthDeg: number,
+  range: readonly [number, number] | readonly number[],
+  toleranceDeg: number,
+): boolean {
+  const center = (range[0] + range[1]) / 2;
+  return angleWithin(sunAzimuthDeg, center, toleranceDeg);
 }

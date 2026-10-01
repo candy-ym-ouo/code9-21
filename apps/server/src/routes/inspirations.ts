@@ -11,6 +11,7 @@ import {
   updateSpotSchema,
   bulkTagSchema,
   expectedAzimuth,
+  lightBearingFromAzimuth,
   validateGeometry,
   type AssetRole,
 } from '@flil/shared';
@@ -369,7 +370,7 @@ inspirationRouter.post(
     getDb()
       .prepare('UPDATE asset SET sun_elevation = ?, sun_azimuth = ?, updated_at = ? WHERE id = ?')
       .run(elevation, azimuth, nowIso(), row.id);
-    const lightBearing = ((azimuth - spot.camera_bearing) % 360 + 360) % 360;
+    const lightBearing = lightBearingFromAzimuth(spot.camera_bearing, azimuth);
     ok(res, {
       shotAt: row.shot_at,
       instant: instant.toISOString(),

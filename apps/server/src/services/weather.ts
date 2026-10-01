@@ -1,33 +1,18 @@
 import { getDb, newId, nowIso, parseJson, toJson } from '../db.js';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
-import { distanceKm, type WeatherPhenomenon } from '@flil/shared';
+import { distanceKm } from '@flil/shared';
+import {
+  climateAt,
+  type ClimateStat,
+  type EpisodeWeather,
+  type HourlyForecast,
+} from '@flil/shared';
 
-export interface HourlyForecast {
-  time: string; // ISO（UTC）
-  cloudCoverPct: number | null;
-  precipProbPct: number | null;
-  precipMm: number | null;
-  visibilityKm: number | null;
-  windSpeedMs: number | null;
-  tempC: number | null;
-  humidityPct: number | null;
-  snowfallCm: number | null;
-}
-
-export interface EpisodeWeather {
-  degraded: boolean;
-  provider: string;
-  avgCloudCoverPct: number | null;
-  maxPrecipProbPct: number | null;
-  precipMmWindow: number | null;
-  precipMmPrev6h: number | null;
-  minVisibilityKm: number | null;
-  maxWindSpeedMs: number | null;
-  avgTempC: number | null;
-  humidityPct: number | null;
-  snowfallCm: number | null;
-}
+// 气象的数值口径（类型/聚合/现象判定/阈值）全部来自 @flil/shared，
+// 保证「未来窗口计算」与「历史窗口回放」走同一套纯函数。
+export type { HourlyForecast, EpisodeWeather, ClimateStat };
+export { climateAt };
 
 // ---------------------------------------------------------------- providers
 
@@ -156,144 +141,7 @@ export async function getForecast(lat: number, lng: number, days: number): Promi
   }
 }
 
-function nearest(forecast: HourlyForecast[], at: Date): HourlyForecast | null {
-  if (!forecast.length) return null;
-  let best = forecast[0];
-  let bestDiff = Math.abs(new Date(best.time).getTime() - at.getTime());
-  for (const f of forecast) {
-    const diff = Math.abs(new Date(f.time).getTime() - at.getTime());
-    if (diff < bestDiff) {
-      best = f;
-      bestDiff = diff;
-    }
-  }
-  return bestDiff <= 3 * 3600000 ? best : null;
-}
-
-function slice(forecast: HourlyForecast[], from: Date, to: Date): HourlyForecast[] {
-  return forecast.filter((f) => {
-    const t = new Date(f.time).getTime();
-    return t >= from.getTime() && t <= to.getTime();
-  });
-}
-
-/**
- * 取窗口内的预报样本。
- *
- * 关键点（实测踩到的坑）：很多窗口只有 20 分钟，可能**完全落在两个整点之间**
- * （例如 16:36–16:59）。若此时只按"窗口内整点"取值，会得到空数组，
- * 于是云量/降水概率/能见度全部判为"无数据"并被静默跳过——
- * 结果是一个雨天窗口被判成 good。因此这里退化为取**相邻两个整点**，
- * 且对"是否会下雨"这类硬性项取更保守的一侧（见 summarizeEpisode 的 max 聚合）。
- */
-function windowSamples(forecast: HourlyForecast[], start: Date, end: Date): HourlyForecast[] {
-  const inside = slice(forecast, start, end);
-  if (inside.length) return inside;
-
-  const before = [...forecast].reverse().find((f) => new Date(f.time).getTime() <= start.getTime());
-  const after = forecast.find((f) => new Date(f.time).getTime() >= end.getTime());
-  const out = [before, after].filter((f): f is HourlyForecast => Boolean(f));
-  if (out.length) return out;
-
-  const fallback = nearest(forecast, start);
-  return fallback ? [fallback] : [];
-}
-
-/** 汇总窗口 [start, end] 的天气，并带上窗口前 6 小时的降水（判定湿地面/雨后需要） */
-export function summarizeEpisode(
-  forecast: HourlyForecast[],
-  start: Date,
-  end: Date,
-): EpisodeWeather {
-  const degraded = forecast.length === 0;
-  if (degraded) {
-    return {
-      degraded: true,
-      provider: config.weatherProvider,
-      avgCloudCoverPct: null,
-      maxPrecipProbPct: null,
-      precipMmWindow: null,
-      precipMmPrev6h: null,
-      minVisibilityKm: null,
-      maxWindSpeedMs: null,
-      avgTempC: null,
-      humidityPct: null,
-      snowfallCm: null,
-    };
-  }
-
-  const inWindow = windowSamples(forecast, start, end);
-  const point = inWindow[0] ?? nearest(forecast, start);
-  const prevRaw = slice(forecast, new Date(start.getTime() - 6 * 3600000), start);
-  const prev = prevRaw.length ? prevRaw : [];
-  const nums = (arr: HourlyForecast[], key: keyof HourlyForecast) =>
-    arr.map((f) => f[key]).filter((v): v is number => typeof v === 'number');
-  const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
-  const sum = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) : null);
-
-  const cloud = nums(inWindow, 'cloudCoverPct');
-  const precipProb = nums(inWindow, 'precipProbPct');
-  const vis = nums(inWindow, 'visibilityKm');
-  const wind = nums(inWindow, 'windSpeedMs');
-  const temp = nums(inWindow, 'tempC');
-  const snow = nums(inWindow, 'snowfallCm');
-
-  return {
-    degraded: false,
-    provider: config.weatherProvider,
-    avgCloudCoverPct: avg(cloud),
-    maxPrecipProbPct: precipProb.length ? Math.max(...precipProb) : null,
-    precipMmWindow: sum(nums(inWindow, 'precipMm')),
-    precipMmPrev6h: sum(nums(prev, 'precipMm')),
-    minVisibilityKm: vis.length ? Math.min(...vis) : null,
-    maxWindSpeedMs: wind.length ? Math.max(...wind) : null,
-    avgTempC: avg(temp),
-    humidityPct: point?.humidityPct ?? null,
-    snowfallCm: snow.length ? Math.max(...snow) : null,
-  };
-}
-
-/** 特殊现象判定（文档 12.4 第 3 步） */
-export function phenomenonHolds(
-  phenomenon: WeatherPhenomenon,
-  episode: EpisodeWeather,
-  isNight: boolean,
-): boolean {
-  switch (phenomenon) {
-    case 'any':
-      return true;
-    case 'clear':
-      return (episode.avgCloudCoverPct ?? 0) <= 20;
-    case 'thin_cloud':
-      return episode.avgCloudCoverPct !== null && episode.avgCloudCoverPct > 20 && episode.avgCloudCoverPct <= 60;
-    case 'overcast':
-      return (episode.avgCloudCoverPct ?? 0) > 80;
-    case 'after_rain':
-      return (episode.precipMmPrev6h ?? 0) > 0.2 || (episode.precipMmWindow ?? 0) > 0.2;
-    case 'wet_ground':
-      return (episode.precipMmPrev6h ?? 0) > 0.2 && (episode.maxPrecipProbPct ?? 100) <= 20;
-    case 'fog':
-      return (episode.minVisibilityKm ?? 99) <= 1 && (episode.humidityPct ?? 0) >= 92;
-    case 'snow':
-      return (episode.snowfallCm ?? 0) > 0;
-    case 'neon_reflection':
-      return isNight && (episode.precipMmPrev6h ?? 0) > 0.2;
-    case 'strong_wind':
-      return (episode.maxWindSpeedMs ?? 0) >= 8;
-    default:
-      return false;
-  }
-}
-
 // ------------------------------------------------------- 气候基线（文档 12.5）
-
-export interface ClimateStat {
-  month: number;
-  hour: number;
-  meanCloudCoverPct: number;
-  precipHourRatio: number;
-  samples: number;
-}
 
 /**
  * 用 Open-Meteo 历史接口（过去 5 年同期）统计气候基线。
@@ -366,13 +214,6 @@ export async function climateStats(lat: number, lng: number, month: number): Pro
   } finally {
     clearTimeout(timer);
   }
-}
-
-export function climateAt(stats: ClimateStat[], hour: number): ClimateStat | null {
-  if (!stats.length) return null;
-  return stats.reduce((best, s) =>
-    Math.abs(s.hour - hour) < Math.abs(best.hour - hour) ? s : best,
-  );
 }
 
 export { distanceKm };

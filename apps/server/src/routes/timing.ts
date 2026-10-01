@@ -24,6 +24,8 @@ import {
   listWindows,
   loadSpotGeom,
   loadTiming,
+  replayWindowRow,
+  replayWindowsForInspiration,
   timingRowToDto,
   windowSummary,
 } from '../services/windowEngine.js';
@@ -185,6 +187,42 @@ timingRouter.post(
     const days = Math.min(16, Math.max(1, Number(req.body?.days ?? 7)));
     const items = await computeWindowsForInspiration(row.id, { days });
     ok(res, { items });
+  }),
+);
+
+/**
+ * 重放一张卡的全部历史窗口：用每条窗口落库时的输入快照（条件 + 机位 + 当次预报切片）
+ * 重新跑同一套纯判定，返回落库值、重放值及两者是否逐项一致。
+ * 快照机制之前产生的旧窗口以 replayable=false 返回（原判定仍保留可读），不报错。
+ */
+timingRouter.post(
+  '/inspirations/:id/windows/replay',
+  ah(async (req, res) => {
+    const ctx = ctxOf(req);
+    const row = requireInspiration(req.params.id, ctx.libraryId);
+    const items = replayWindowsForInspiration(row.id);
+    ok(res, {
+      items,
+      replayable: items.filter((i) => i.replayable).length,
+      total: items.length,
+      identical: items.every((i) => !i.replayable || i.identical),
+    });
+  }),
+);
+
+/** 重放单条历史窗口（按窗口 id）；旧窗口（无快照）返回 replayable=false 而非报错。 */
+timingRouter.post(
+  '/windows/:windowId/replay',
+  ah(async (req, res) => {
+    const ctx = ctxOf(req);
+    const windowId = String(req.params.windowId);
+    const row = getDb()
+      .prepare('SELECT inspiration_id, library_id FROM repro_window WHERE id = ?')
+      .get(windowId) as { inspiration_id: string; library_id: string } | undefined;
+    if (!row || row.library_id !== ctx.libraryId) throw errors.notFound('窗口');
+    // 仍校验卡片归属，行为与其它 /inspirations/:id 路由一致
+    requireInspiration(row.inspiration_id, ctx.libraryId);
+    ok(res, replayWindowRow(windowId));
   }),
 );
 

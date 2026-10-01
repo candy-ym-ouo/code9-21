@@ -1,32 +1,22 @@
 import {
   addDaysToKey,
-  addMinutes,
-  angularDistance,
-  bandToRange,
-  elevationInRange,
-  formatLocal,
   localDateKey,
-  parseLocalDateKey,
-  resolveAnchor,
-  sampleWindow,
-  solarPosition,
-  sunEvents,
+  reproWindowRowToDto,
+  evaluateDayWindow,
+  evaluateDayWindowInput,
+  buildWindowDayInput,
+  sliceForecastForDay,
   type ReproWindowDto,
+  type ReproWindowRow,
   type TimingDto,
-  type WeatherPhenomenon,
-  type WindowReasonDto,
-  type WindowVerdict,
+  type WindowDayInput,
+  type HourlyForecast,
 } from '@flil/shared';
 import { getDb, newId, nowIso, parseJson, toJson } from '../db.js';
 import { errors } from '../http/errors.js';
 import { config } from '../config.js';
 import { emitEvent } from './events.js';
-import {
-  getForecast,
-  phenomenonHolds,
-  summarizeEpisode,
-  type EpisodeWeather,
-} from './weather.js';
+import { getForecast } from './weather.js';
 
 export interface TimingRow {
   id: string;
@@ -82,388 +72,23 @@ export function loadSpotGeom(spotId: string): SpotGeom | null {
   return row ?? null;
 }
 
-interface DayResult {
-  date: string;
-  startAt: Date;
-  endAt: Date;
-  anchorAt: Date;
-  sunElevation: number | null;
-  sunAzimuth: number | null;
-  verdict: WindowVerdict;
-  reasons: WindowReasonDto[];
-  episode: EpisodeWeather | null;
-}
-
-const CONTIGUOUS_GAP_MIN = 6;
-
-/** 找出满足条件的最长连续时间段 */
-function longestRun(
-  samples: { at: Date; ok: boolean }[],
-): { start: Date; end: Date } | null {
-  let best: { start: Date; end: Date } | null = null;
-  let runStart: Date | null = null;
-  let prevAt: Date | null = null;
-
-  for (const s of samples) {
-    if (s.ok) {
-      if (!runStart) runStart = s.at;
-      else if (prevAt && (s.at.getTime() - prevAt.getTime()) / 60000 > CONTIGUOUS_GAP_MIN) {
-        const candidate = { start: runStart, end: prevAt };
-        if (!best || candidate.end.getTime() - candidate.start.getTime() > best.end.getTime() - best.start.getTime()) {
-          best = candidate;
-        }
-        runStart = s.at;
-      }
-      prevAt = s.at;
-    } else if (runStart && prevAt) {
-      const candidate = { start: runStart, end: prevAt };
-      if (!best || candidate.end.getTime() - candidate.start.getTime() > best.end.getTime() - best.start.getTime()) {
-        best = candidate;
-      }
-      runStart = null;
-      prevAt = null;
-    }
-  }
-  if (runStart && prevAt) {
-    const candidate = { start: runStart, end: prevAt };
-    if (!best || candidate.end.getTime() - candidate.start.getTime() > best.end.getTime() - best.start.getTime()) {
-      best = candidate;
-    }
-  }
-  return best;
-}
-
-function fmtDeg(v: number | null | undefined, digits = 1): string {
-  return v === null || v === undefined ? '未知' : `${v.toFixed(digits)}°`;
-}
-
-/** 判定单日窗口（文档 12.4 的算法，逐项产出 reasons） */
+/**
+ * 单日判定（旧接口，保持原签名/返回结构不变）。
+ * 实现已下沉到 @flil/shared 的纯管线 evaluateDayWindow —— 未来窗口与历史窗口重放同源。
+ */
 export function computeDay(
   spot: SpotGeom,
   timing: TimingDto,
   dateKey: string,
-  forecast: Awaited<ReturnType<typeof getForecast>>,
-): DayResult {
-  const reasons: WindowReasonDto[] = [];
-  const tz = spot.tz;
-  const events = sunEvents(spot.lat, spot.lng, tz, dateKey);
-  events.notes.forEach((n) => reasons.push({ code: 'SUN_EVENT_NOTE', level: 'info', text: n }));
-
-  // ---- 季节窗口 ----
-  if (timing.seasonWindow) {
-    const { month } = parseLocalDateKey(dateKey);
-    const { fromMonth, toMonth } = timing.seasonWindow;
-    const inSeason =
-      fromMonth <= toMonth ? month >= fromMonth && month <= toMonth : month >= fromMonth || month <= toMonth;
-    if (!inSeason) {
-      reasons.push({
-        code: 'OUT_OF_SEASON',
-        level: 'bad',
-        text: `${month} 月不在设定季节窗口（${fromMonth}–${toMonth} 月）内`,
-      });
-      return {
-        date: dateKey,
-        startAt: events.solarNoon,
-        endAt: events.solarNoon,
-        anchorAt: events.solarNoon,
-        sunElevation: null,
-        sunAzimuth: null,
-        verdict: 'bad',
-        reasons,
-        episode: null,
-      };
-    }
-  }
-
-  // ---- 1) 天文项：解析锚点 ----
-  const resolved = resolveAnchor(events, timing);
-  if (!resolved) {
-    reasons.push({
-      code: 'ANCHOR_UNRESOLVABLE',
-      level: 'bad',
-      text: `该日无法解析时间锚点（可能是极昼/极夜或偏移越界）`,
-    });
-    return {
-      date: dateKey,
-      startAt: events.solarNoon,
-      endAt: events.solarNoon,
-      anchorAt: events.solarNoon,
-      sunElevation: null,
-      sunAzimuth: null,
-      verdict: 'bad',
-      reasons,
-      episode: null,
-    };
-  }
-
-  resolved.notes.forEach((n) => reasons.push({ code: 'ANCHOR_NOTE', level: 'info', text: n }));
-  reasons.push({
-    code: 'ANCHOR_RESOLVED',
-    level: 'ok',
-    text: `${describeAnchor(timing)} → ${formatLocal(resolved.anchorAt, tz)}`,
-  });
-
-  const [bandStart, bandEnd] = bandToRange(resolved, timing);
-  const effectiveElevation = resolved.elevationRange ?? timing.elevationRange;
-  if (resolved.elevationRange) {
-    reasons.push({
-      code: 'ELEVATION_TARGET',
-      level: 'info',
-      text: `该锚点自带仰角区间 ${resolved.elevationRange[0]}°–${resolved.elevationRange[1]}°`,
-    });
-  }
-
-  const spanMin = Math.max(1, (bandEnd.getTime() - bandStart.getTime()) / 60000);
-  const stepMin = Math.max(1, Math.ceil(spanMin / 300)); // 最多 300 个采样点
-  const samples = sampleWindow(spot.lat, spot.lng, bandStart, bandEnd, stepMin);
-
-  const elevOk = samples.filter((s) => elevationInRange(s.elevationDeg, effectiveElevation));
-  if (elevOk.length < 2) {
-    const p = solarPosition(resolved.anchorAt, spot.lat, spot.lng);
-    reasons.push({
-      code: 'ELEVATION_MISS',
-      level: 'bad',
-      text: `窗口内太阳仰角始终不在 ${effectiveElevation[0]}°–${effectiveElevation[1]}°（锚点处实测 ${fmtDeg(
-        p.elevationDeg,
-      )}）`,
-    });
-    return {
-      date: dateKey,
-      startAt: bandStart,
-      endAt: bandEnd,
-      anchorAt: resolved.anchorAt,
-      sunElevation: p.elevationDeg,
-      sunAzimuth: p.azimuthDeg,
-      verdict: 'bad',
-      reasons,
-      episode: null,
-    };
-  }
-  reasons.push({
-    code: 'ELEVATION_OK',
-    level: 'ok',
-    text: `窗口内仰角 ${fmtDeg(Math.min(...elevOk.map((s) => s.elevationDeg)))}–${fmtDeg(
-      Math.max(...elevOk.map((s) => s.elevationDeg)),
-    )}（目标 ${effectiveElevation[0]}°–${effectiveElevation[1]}°）`,
-  });
-
-  // ---- 2) 方位角约束（光位）----
-  let candidateSamples = samples.map((s) => ({ ...s, ok: elevationInRange(s.elevationDeg, effectiveElevation) }));
-  if (timing.azimuthRange) {
-    const [azLo, azHi] = timing.azimuthRange;
-    const center = (azLo + azHi) / 2;
-    const tol = timing.azimuthTolerance;
-    candidateSamples = samples.map((s) => ({
-      ...s,
-      ok:
-        elevationInRange(s.elevationDeg, effectiveElevation) &&
-        angularDistance(s.azimuthDeg, center) <= tol,
-    }));
-    const azOk = candidateSamples.filter((s) => s.ok);
-    if (azOk.length < 2) {
-      const p = solarPosition(resolved.anchorAt, spot.lat, spot.lng);
-      reasons.push({
-        code: 'AZIMUTH_MISS',
-        level: 'bad',
-        text: `太阳方位角始终不在 ${azLo.toFixed(0)}°±${tol}°（锚点处实测 ${fmtDeg(p.azimuthDeg)}）`,
-      });
-      return {
-        date: dateKey,
-        startAt: bandStart,
-        endAt: bandEnd,
-        anchorAt: resolved.anchorAt,
-        sunElevation: p.elevationDeg,
-        sunAzimuth: p.azimuthDeg,
-        verdict: 'bad',
-        reasons,
-        episode: null,
-      };
-    }
-    reasons.push({
-      code: 'AZIMUTH_OK',
-      level: 'ok',
-      text: `方位角命中 ${azLo.toFixed(0)}°±${tol}°（窗口内实测 ${fmtDeg(
-        Math.min(...azOk.map((s) => s.azimuthDeg)),
-      )}–${fmtDeg(Math.max(...azOk.map((s) => s.azimuthDeg)))}）`,
-    });
-  }
-
-  const run = longestRun(candidateSamples);
-  if (!run) {
-    reasons.push({ code: 'WINDOW_EMPTY', level: 'bad', text: '没有满足全部天文约束的时刻' });
-    return {
-      date: dateKey,
-      startAt: bandStart,
-      endAt: bandEnd,
-      anchorAt: resolved.anchorAt,
-      sunElevation: null,
-      sunAzimuth: null,
-      verdict: 'bad',
-      reasons,
-      episode: null,
-    };
-  }
-
-  const durationMin = (run.end.getTime() - run.start.getTime()) / 60000 + stepMin;
-  let verdict: WindowVerdict = 'good';
-  if (durationMin < 5) {
-    verdict = 'marginal';
-    reasons.push({
-      code: 'WINDOW_TOO_SHORT',
-      level: 'warn',
-      text: `可用窗口仅约 ${durationMin.toFixed(0)} 分钟（少于 5 分钟）`,
-    });
-  }
-  reasons.push({
-    code: 'WINDOW_RANGE',
-    level: 'ok',
-    text: `窗口 ${formatLocal(run.start, tz)}–${formatLocal(run.end, tz)}（约 ${durationMin.toFixed(0)} 分钟）`,
-  });
-
-  const mid = new Date((run.start.getTime() + run.end.getTime()) / 2);
-  const midPos = solarPosition(mid, spot.lat, spot.lng);
-
-  // ---- 3) 天气项 ----
-  const episode = summarizeEpisode(forecast, run.start, run.end);
-  if (episode.degraded) {
-    reasons.push({
-      code: 'WEATHER_DEGRADED',
-      level: 'warn',
-      text: '天气源不可用：本次判定未包含天气，最高只能到「勉强」',
-    });
-    if (verdict === 'good') verdict = 'marginal';
-  } else {
-    const profile = timing.weatherProfile;
-    const hard = new Set(profile.hardRequirements ?? ['precipProbPctMax']);
-    const isNight = midPos.elevationDeg < -12;
-
-    const check = (
-      code: string,
-      key: string,
-      actual: number | null,
-      limit: number,
-      compare: 'max' | 'min',
-      text: string,
-    ): void => {
-      if (actual === null) return;
-      const violated = compare === 'max' ? actual > limit : actual < limit;
-      if (!violated) {
-        reasons.push({ code, level: 'ok', text });
-        return;
-      }
-      const isHard = hard.has(key);
-      reasons.push({
-        code: `${code}_${isHard ? 'FAIL' : 'MARGINAL'}`,
-        level: isHard ? 'bad' : 'warn',
-        text,
-      });
-      if (isHard) verdict = 'bad';
-      else if (verdict === 'good') verdict = 'marginal';
-    };
-
-    if (profile.precipProbPctMax !== undefined) {
-      check(
-        'PRECIP',
-        'precipProbPctMax',
-        episode.maxPrecipProbPct,
-        profile.precipProbPctMax,
-        'max',
-        `降水概率 ${episode.maxPrecipProbPct?.toFixed(0) ?? '?'}%（上限 ${profile.precipProbPctMax}%）`,
-      );
-    }
-    if (profile.windSpeedMax !== undefined) {
-      check(
-        'WIND',
-        'windSpeedMax',
-        episode.maxWindSpeedMs,
-        profile.windSpeedMax,
-        'max',
-        `风速 ${episode.maxWindSpeedMs?.toFixed(1) ?? '?'} m/s（上限 ${profile.windSpeedMax}）`,
-      );
-    }
-    if (profile.visibilityKmMin !== undefined) {
-      check(
-        'VISIBILITY',
-        'visibilityKmMin',
-        episode.minVisibilityKm,
-        profile.visibilityKmMin,
-        'min',
-        `能见度 ${episode.minVisibilityKm?.toFixed(1) ?? '?'} km（下限 ${profile.visibilityKmMin}）`,
-      );
-    }
-
-    if (profile.cloudCoverPct && episode.avgCloudCoverPct !== null) {
-      const { min, max } = profile.cloudCoverPct;
-      const cloud = episode.avgCloudCoverPct;
-      const ok = cloud >= min && cloud <= max;
-      const isHard = hard.has('cloudCoverPct');
-      reasons.push({
-        code: ok ? 'CLOUD_OK' : isHard ? 'CLOUD_FAIL' : 'CLOUD_MARGINAL',
-        level: ok ? 'ok' : isHard ? 'bad' : 'warn',
-        text: `云量 ${cloud.toFixed(0)}%（目标 ${min}%–${max}%）`,
-      });
-      if (!ok) {
-        if (isHard) verdict = 'bad';
-        else if (verdict === 'good') verdict = 'marginal';
-      }
-    }
-
-    if (profile.tempC && episode.avgTempC !== null) {
-      const ok = episode.avgTempC >= profile.tempC.min && episode.avgTempC <= profile.tempC.max;
-      const isHard = hard.has('tempC');
-      reasons.push({
-        code: ok ? 'TEMP_OK' : isHard ? 'TEMP_FAIL' : 'TEMP_MARGINAL',
-        level: ok ? 'ok' : isHard ? 'bad' : 'warn',
-        text: `气温 ${episode.avgTempC.toFixed(0)}℃（目标 ${profile.tempC.min}–${profile.tempC.max}℃）`,
-      });
-      if (!ok) {
-        if (isHard) verdict = 'bad';
-        else if (verdict === 'good') verdict = 'marginal';
-      }
-    }
-
-    for (const phenomenon of (profile.phenomena ?? []) as WeatherPhenomenon[]) {
-      if (phenomenon === 'any') continue;
-      const hit = phenomenonHolds(phenomenon, episode, isNight);
-      const isHard = hard.has(`phenomenon:${phenomenon}`);
-      reasons.push({
-        code: hit ? 'PHENOMENON_OK' : isHard ? 'PHENOMENON_FAIL' : 'PHENOMENON_MARGINAL',
-        level: hit ? 'ok' : isHard ? 'bad' : 'warn',
-        text: `特殊现象「${phenomenon}」${hit ? '满足' : '不满足'}`,
-      });
-      if (!hit) {
-        if (isHard) verdict = 'bad';
-        else if (verdict === 'good') verdict = 'marginal';
-      }
-    }
-  }
-
-  return {
-    date: dateKey,
-    startAt: run.start,
-    endAt: run.end,
-    anchorAt: resolved.anchorAt,
-    sunElevation: midPos.elevationDeg,
-    sunAzimuth: midPos.azimuthDeg,
-    verdict,
-    reasons,
-    episode,
-  };
-}
-
-function describeAnchor(timing: TimingDto): string {
-  switch (timing.timeAnchor) {
-    case 'sunrise_plus':
-      return `日出后 ${timing.anchorOffsetMin} 分`;
-    case 'sunset_minus':
-      return `日落前 ${Math.abs(timing.anchorOffsetMin)} 分`;
-    case 'fixed_clock':
-      return `固定钟点 ${String(Math.floor(timing.anchorOffsetMin / 60)).padStart(2, '0')}:${String(
-        Math.round(timing.anchorOffsetMin % 60),
-      ).padStart(2, '0')}`;
-    default:
-      return timing.timeAnchor;
-  }
+  forecast: HourlyForecast[],
+) {
+  return evaluateDayWindow(
+    { lat: spot.lat, lng: spot.lng, tz: spot.tz },
+    timing,
+    dateKey,
+    forecast,
+    config.weatherProvider,
+  );
 }
 
 export interface ComputeOptions {
@@ -474,6 +99,9 @@ export interface ComputeOptions {
 /**
  * 计算并落库某条灵感卡的未来窗口。
  * 幂等：同一 (inspiration, date) 只保留一条窗口；被计划引用的窗口原地更新，避免打断闭环。
+ *
+ * 每条窗口同时写入 input_snapshot（机位 + 条件 + 当次预报切片 + provider + 算法版本），
+ * 供日后用 replayWindowRow 无损重放（历史窗口必须可重放）。
  */
 export async function computeWindowsForInspiration(
   inspirationId: string,
@@ -500,7 +128,7 @@ export async function computeWindowsForInspiration(
   const todayKey = localDateKey(now, spot.tz);
   const forecast = await getForecast(spot.lat, spot.lng, days);
 
-  const results: DayResult[] = [];
+  const results = [] as ReturnType<typeof computeDay>[];
   for (let i = 0; i < days; i += 1) {
     const key = addDaysToKey(todayKey, i);
     results.push(computeDay(spot, timing, key, forecast));
@@ -523,6 +151,16 @@ export async function computeWindowsForInspiration(
 
   const persist = db.transaction(() => {
     for (const r of results) {
+      // 当次判定的可重放输入：只存当日实际用到的预报切片（空数组 = 降级也原样保留）
+      const dayForecast = sliceForecastForDay(forecast, spot.tz, r.date);
+      const snapshot = buildWindowDayInput(
+        { lat: spot.lat, lng: spot.lng, tz: spot.tz },
+        timing,
+        r.date,
+        dayForecast,
+        config.weatherProvider,
+      );
+
       const prior = previousByDate.get(r.date);
       let id: string;
       if (prior && plannedWindowIds.has(prior.id)) {
@@ -530,7 +168,7 @@ export async function computeWindowsForInspiration(
         id = prior.id;
         db.prepare(
           `UPDATE repro_window SET start_at=?, end_at=?, anchor_at=?, sun_elevation=?, sun_azimuth=?,
-             verdict=?, reasons=?, forecast_snapshot=?, weather_degraded=?, stale=0, computed_at=?
+             verdict=?, reasons=?, forecast_snapshot=?, weather_degraded=?, stale=0, computed_at=?, input_snapshot=?
            WHERE id=?`,
         ).run(
           r.startAt.toISOString(),
@@ -543,6 +181,7 @@ export async function computeWindowsForInspiration(
           r.episode ? toJson(r.episode) : null,
           r.episode?.degraded ? 1 : 0,
           ts,
+          toJson(snapshot),
           id,
         );
       } else {
@@ -552,8 +191,9 @@ export async function computeWindowsForInspiration(
         id = newId();
         db.prepare(
           `INSERT INTO repro_window (id, library_id, inspiration_id, date, start_at, end_at, anchor_at,
-             sun_elevation, sun_azimuth, verdict, reasons, forecast_snapshot, weather_degraded, stale, computed_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)`,
+             sun_elevation, sun_azimuth, verdict, reasons, forecast_snapshot, weather_degraded, stale, computed_at,
+             input_snapshot)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
         ).run(
           id,
           inspiration.library_id,
@@ -569,6 +209,7 @@ export async function computeWindowsForInspiration(
           r.episode ? toJson(r.episode) : null,
           r.episode?.degraded ? 1 : 0,
           ts,
+          toJson(snapshot),
         );
       }
 
@@ -581,19 +222,29 @@ export async function computeWindowsForInspiration(
       }
 
       dtos.push({
-        id,
-        inspirationId,
-        date: r.date,
-        startAt: r.startAt.toISOString(),
-        endAt: r.endAt.toISOString(),
-        anchorAt: r.anchorAt.toISOString(),
-        sunElevation: r.sunElevation,
-        sunAzimuth: r.sunAzimuth,
-        verdict: r.verdict,
-        reasons: r.reasons,
+        ...reproWindowRowToDto({
+          ...({
+            id,
+            library_id: inspiration.library_id,
+            inspiration_id: inspirationId,
+            date: r.date,
+            start_at: r.startAt.toISOString(),
+            end_at: r.endAt.toISOString(),
+            anchor_at: r.anchorAt.toISOString(),
+            sun_elevation: r.sunElevation,
+            sun_azimuth: r.sunAzimuth,
+            verdict: r.verdict,
+            reasons: r.reasons,
+            forecast_snapshot: null,
+            weather_degraded: r.episode?.degraded ? 1 : 0,
+            stale: 0,
+            computed_at: ts,
+            input_snapshot: toJson(snapshot),
+          } satisfies ReproWindowRow),
+        }),
+        // 历史口径：重算接口对"天文项提前判 bad、未走到天气项"（episode=null）的窗口
+        // 一直返回 weatherDegraded=true；list/落库路径按列值为 false。两者差异保留，不改既有行为。
         weatherDegraded: r.episode?.degraded ?? true,
-        stale: false,
-        computedAt: ts,
       });
     }
   });
@@ -605,22 +256,68 @@ export async function computeWindowsForInspiration(
 export function listWindows(inspirationId: string): ReproWindowDto[] {
   const rows = getDb()
     .prepare('SELECT * FROM repro_window WHERE inspiration_id = ? ORDER BY date ASC, start_at ASC')
-    .all(inspirationId) as Record<string, unknown>[];
-  return rows.map((r) => ({
-    id: r.id as string,
-    inspirationId: r.inspiration_id as string,
-    date: r.date as string,
-    startAt: r.start_at as string,
-    endAt: r.end_at as string,
-    anchorAt: r.anchor_at as string,
-    sunElevation: (r.sun_elevation as number | null) ?? null,
-    sunAzimuth: (r.sun_azimuth as number | null) ?? null,
-    verdict: r.verdict as WindowVerdict,
-    reasons: parseJson<WindowReasonDto[]>(r.reasons, []),
-    weatherDegraded: r.weather_degraded === 1,
-    stale: r.stale === 1,
-    computedAt: (r.computed_at as string | null) ?? null,
-  }));
+    .all(inspirationId) as ReproWindowRow[];
+  return rows.map(reproWindowRowToDto);
+}
+
+function getWindowRow(windowId: string): ReproWindowRow | null {
+  return (
+    (getDb().prepare('SELECT * FROM repro_window WHERE id = ?').get(windowId) as ReproWindowRow | undefined) ?? null
+  );
+}
+
+/**
+ * 用落库时的输入快照重放单条历史窗口（不覆盖原行，只返回重放结果）。
+ * 返回 replayable=false 表示该窗口产生于快照机制之前（旧数据），无法重放，但原 verdict/reasons 仍可读。
+ */
+export function replayWindowRow(windowId: string): {
+  replayable: boolean;
+  stored: ReproWindowDto;
+  replayed: ReproWindowDto | null;
+  engineVersion: string | null;
+  identical: boolean | null;
+} {
+  const row = getWindowRow(windowId);
+  if (!row) throw errors.notFound('窗口');
+  const stored = reproWindowRowToDto(row);
+
+  const snapshot = row.input_snapshot ? parseJson<WindowDayInput | null>(row.input_snapshot, null) : null;
+  if (!snapshot || snapshot.schema !== 'flil/window-input') {
+    return { replayable: false, stored, replayed: null, engineVersion: null, identical: null };
+  }
+
+  const r = evaluateDayWindowInput(snapshot);
+  const replayed: ReproWindowDto = {
+    ...stored,
+    startAt: r.startAt.toISOString(),
+    endAt: r.endAt.toISOString(),
+    anchorAt: r.anchorAt.toISOString(),
+    sunElevation: r.sunElevation,
+    sunAzimuth: r.sunAzimuth,
+    verdict: r.verdict,
+    reasons: r.reasons,
+    weatherDegraded: r.episode?.degraded ?? stored.weatherDegraded,
+    stale: stored.stale,
+    computedAt: stored.computedAt,
+  };
+
+  // 判定口径一致性：verdict 与逐项理由必须与落库时完全一致
+  const identical =
+    replayed.verdict === stored.verdict &&
+    JSON.stringify(replayed.reasons) === JSON.stringify(stored.reasons) &&
+    replayed.startAt === stored.startAt &&
+    replayed.endAt === stored.endAt &&
+    replayed.anchorAt === stored.anchorAt;
+
+  return { replayable: true, stored, replayed, engineVersion: snapshot.engineVersion, identical };
+}
+
+/** 重放一张卡的全部窗口；旧窗口（无快照）以 replayable=false 原样返回，不报错。 */
+export function replayWindowsForInspiration(inspirationId: string) {
+  const rows = getDb()
+    .prepare('SELECT id FROM repro_window WHERE inspiration_id = ? ORDER BY date ASC')
+    .all(inspirationId) as { id: string }[];
+  return rows.map((r) => replayWindowRow(r.id));
 }
 
 export function windowSummary(
@@ -644,5 +341,3 @@ export function windowSummary(
     .get(inspirationId, nowIsoStr, until) as { n: number };
   return { nextGoodAt: next?.start_at ?? null, goodIn30d: count.n };
 }
-
-export { addMinutes, formatLocal };
